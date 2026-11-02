@@ -8,13 +8,13 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -A x64
       - name: Build
         run: cmake --build build --config Release --target DubRack_VST3 --parallel
       - name: Upload VST3
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: DubRack-Windows-VST3
           path: build/DubRack_artefacts/Release/VST3/DubRack.vst3
@@ -22,13 +22,13 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         run: cmake -S . -B build -G Xcode
       - name: Build
         run: cmake --build build --config Release --target DubRack_VST3 --parallel
       - name: Upload VST3
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: DubRack-macOS-VST3
           path: build/DubRack_artefacts/Release/VST3/DubRack.vst3
