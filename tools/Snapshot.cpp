@@ -75,6 +75,25 @@ static int autoMixTest()
     juce::MidiBuffer midi;
     juce::AudioBuffer<float> stem (2, block), sum (2, block);
     juce::int64 pos = 0;
+
+    // Two DubRig instances (normally another plugin DLL) talking over DubLink only
+    struct FakeRig { std::uint32_t id; const char* track; const char* inst; float lufs, trim = 0, pan = 0, lowCut = 0; std::uint32_t seq = 0; };
+    std::vector<FakeRig> rigs { { dublink::newId(), "Gtr Skank L", "Skank Guitar", -20.0f }, { dublink::newId(), "Gtr Rhythm", "Rhythm Guitar", -16.0f } };
+    auto pumpRigs = [&]
+    {
+        for (auto& r : rigs)
+        {
+            dublink::Request req;
+            if (dublink::takeRequest (r.id, r.seq, req)) { r.trim = req.trimDb; if (req.lowCutHz > 0) r.lowCut = req.lowCutHz; if (req.pan >= -1) r.pan = req.pan; }
+            dublink::Info i;
+            i.kind = dublink::kindRig;
+            dublink::copyString (i.track, sizeof (i.track), r.track);
+            dublink::copyString (i.instrument, sizeof (i.instrument), r.inst);
+            i.pan = r.pan; i.lufsShort = r.lufs + r.trim;
+            i.capGen = dublink::captureGeneration(); i.capChunks = 50; i.capLufs = r.lufs;
+            dublink::publish (r.id, i);
+        }
+    };
     auto run = [&] (double seconds)
     {
         for (int k = 0; k < (int) (seconds * fs / block); ++k)
@@ -88,7 +107,7 @@ static int autoMixTest()
             }
             master.processBlock (sum, midi);
             pos += block;
-            if (k % 8 == 0) juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+            if (k % 8 == 0) { pumpRigs(); juce::MessageManager::getInstance()->runDispatchLoopUntil (1); }
         }
     };
     auto levels = [&] (const char* title)
@@ -98,6 +117,8 @@ static int autoMixTest()
             std::cout << "  " << names[t] << " -> " << tracks[t]->resolvedInstrument() << "  LUFS-S " << tracks[t]->loudness.shortTerm.load()
                       << "  trim " << tracks[t]->apvts.getRawParameterValue (pid::mixTrim)->load()
                       << "  hpf " << tracks[t]->apvts.getRawParameterValue (pid::hpf)->load() << "\n";
+        for (auto& r : rigs)
+            std::cout << "  " << r.track << " (DubRig) -> " << r.inst << "  trim " << r.trim << "  lowcut " << r.lowCut << "  pan " << r.pan << "\n";
         std::cout << "  MASTER -> " << master.resolvedInstrument() << "  LUFS-S " << master.loudness.shortTerm.load() << "\n";
     };
     run (4.0);
@@ -158,13 +179,40 @@ int main (int argc, char** argv)
     }
     std::cout << "presets with problems: " << bad << "\n";
 
-    // 3. Screenshot with audio flowing
+    // 3. Screenshot with audio flowing (a few demo tracks on DubLink so the mix-bus map has content)
     proc.setCurrentProgram (preset);
+    if (auto* ip = proc.apvts.getParameter (pid::instrument))
+        ip->setValueNotifyingHost (ip->convertTo0to1 ((float) presets::instruments.indexOf ("Mix Bus") + 1.0f));
+    struct Demo { const char* track; const char* inst; bool rig; float pan, lufs; float bands[8]; std::uint32_t id; };
+    std::vector<Demo> demo {
+        { "Kick", "Kick", false, 0.0f, -17, { -20, -22, -30, -36, -40, -42, -40, -44 }, 0 },
+        { "Bass DI", "Bass", false, 0.0f, -15, { -18, -17, -22, -30, -38, -46, -52, -60 }, 0 },
+        { "Snare", "Snare", false, 0.05f, -21, { -40, -34, -28, -26, -27, -30, -32, -34 }, 0 },
+        { "Gtr Skank", "Skank Guitar", true, -0.35f, -26, { -60, -52, -40, -32, -28, -29, -33, -40 }, 0 },
+        { "Organ", "Organ Bubble", false, -0.25f, -27, { -60, -50, -36, -31, -29, -33, -40, -48 }, 0 },
+        { "Gtr Lead", "Lead Guitar", true, 0.2f, -22, { -60, -50, -36, -30, -26, -27, -31, -40 }, 0 },
+        { "Lead Vox", "Lead Vocal", false, 0.0f, -16, { -60, -44, -34, -28, -24, -24, -27, -32 }, 0 },
+    };
+    for (auto& d : demo) d.id = dublink::newId();
+    auto pumpDemo = [&]
+    {
+        for (auto& d : demo)
+        {
+            dublink::Info i;
+            i.kind = d.rig ? dublink::kindRig : dublink::kindRack;
+            dublink::copyString (i.track, sizeof (i.track), d.track);
+            dublink::copyString (i.instrument, sizeof (i.instrument), d.inst);
+            i.pan = d.pan; i.balance = d.rig ? 0.0f : d.pan; i.lufsShort = d.lufs;
+            for (int k = 0; k < 8; ++k) i.bands[k] = d.bands[k];
+            dublink::publish (d.id, i);
+        }
+    };
     std::unique_ptr<juce::AudioProcessorEditor> ed (proc.createEditorIfNeeded());
     ed->setVisible (true);
     for (int k = 0; k < 120; ++k)
     {
         for (int j = 0; j < 4; ++j) { renderGroove (buf, fs, pos); pos += block; proc.processBlock (buf, midi); }
+        pumpDemo();
         juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
     }
     for (int view = 0; view < 2; ++view)
@@ -178,7 +226,8 @@ int main (int argc, char** argv)
             for (int k = 0; k < 60; ++k)
             {
                 for (int j = 0; j < 4; ++j) { renderGroove (buf, fs, pos); pos += block; proc.processBlock (buf, midi); }
-                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+                pumpDemo();
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
             }
         }
         auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, 1.0f);

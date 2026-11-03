@@ -9,12 +9,15 @@ DubRackProcessor::DubRackProcessor()
       apvts (*this, nullptr, "DubRackState", createParameterLayout())
 {
     MixRegistry::get().add (this);
+    startTimerHz (10);
 }
 
 DubRackProcessor::~DubRackProcessor()
 {
+    stopTimer();
     coordinator.cancel();
     MixRegistry::get().remove (this);
+    dublink::release (linkId);
 }
 
 juce::String DubRackProcessor::getStyleName() const { return presets::styles[(int) p (pid::style)]; }
@@ -24,7 +27,34 @@ juce::String DubRackProcessor::resolvedInstrument() const
     const int idx = (int) p (pid::instrument);
     if (idx > 0) return presets::instruments[idx - 1];
     if (detectedInstrument.isNotEmpty()) return detectedInstrument;
+    const auto rig = rigInstrument();
+    if (rig.isNotEmpty()) return rig;
     return guessInstrumentFromName (getTrackName());
+}
+
+juce::String DubRackProcessor::rigInstrument() const
+{
+    const auto name = getTrackName();
+    if (name.isEmpty()) return {};
+    for (auto& i : dublink::readAll())
+        if (i.kind == dublink::kindRig && dublink::str (i.track) == name) return dublink::str (i.instrument);
+    return {};
+}
+
+void DubRackProcessor::timerCallback()
+{
+    dublink::Info info;
+    info.kind = dublink::kindRack;
+    dublink::copyString (info.track, sizeof (info.track), getTrackName());
+    dublink::copyString (info.instrument, sizeof (info.instrument), resolvedInstrument());
+    dublink::copyString (info.style, sizeof (info.style), getStyleName());
+    const auto& l = presets::factory();
+    dublink::copyString (info.preset, sizeof (info.preset), juce::isPositiveAndBelow (currentPreset, (int) l.size()) ? l[(size_t) currentPreset].name : juce::String());
+    info.pan = 0;
+    info.width = 1;
+    info.lufsShort = loudness.shortTerm.load();
+    linkMeter.fill (info);
+    dublink::publish (linkId, info);
 }
 
 void DubRackProcessor::updateTrackProperties (const TrackProperties& props)
@@ -54,6 +84,7 @@ juce::String DubRackProcessor::guessInstrumentFromName (const juce::String& name
     if (any ({ "perc", "conga", "bongo", "shaker", "tamb", "cowbell", "перк", "конг", "бонг", "шейк", "бубен" })) return "Percussion";
     if (any ({ "bass", "бас" }))                                                          return "Bass";
     if (any ({ "lead g", "solo", "соло" }))                                               return "Lead Guitar";
+    if (any ({ "rhythm", "ритм", "crunch", "riff", "рифф" }))                             return "Rhythm Guitar";
     if (any ({ "skank", "chop", "gtr", "guitar", "скэнк", "скенк", "гитар" }))            return "Skank Guitar";
     if (any ({ "organ", "hammond", "орган" }))                                            return "Organ Bubble";
     if (any ({ "piano", "keys", "rhodes", "пиан", "клав", "рояль" }))                     return "Piano";
@@ -111,6 +142,7 @@ void DubRackProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     reverb.prepare (spec);
     limiter.prepare (sampleRate, nch);
     loudness.prepare (sampleRate, nch);
+    linkMeter.prepare (sampleRate);
     smart.prepare (sampleRate);
     mono.assign ((size_t) juce::jmax (512, samplesPerBlock), 0.0f);
 
@@ -265,6 +297,7 @@ void DubRackProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
     outPeakDb.store (peakDb (buffer));
     loudness.process (buffer);
+    linkMeter.process (buffer);
     pushMono (postFifo);
 }
 

@@ -8,8 +8,10 @@
 #include "dsp/Colour.h"
 #include "dsp/Space.h"
 #include "MixLink.h"
+#include "DubLink.h"
+#include "LinkMeter.h"
 
-class DubRackProcessor : public juce::AudioProcessor
+class DubRackProcessor : public juce::AudioProcessor, private juce::Timer
 {
 public:
     DubRackProcessor();
@@ -49,6 +51,8 @@ public:
     void updateTrackProperties (const TrackProperties& props) override;
     static juce::String guessInstrumentFromName (const juce::String& name);
     juce::String detectedInstrument;          // set by the smart mode (message thread)
+    juce::String rigInstrument() const;       // what a DubRig on the same track says it plays (or empty)
+    std::uint32_t getLinkId() const { return linkId; }
 
     // Settings after the simple-mode macros are applied (used by DSP and by the EQ display)
     EqSettings getEffectiveEq() const;
@@ -68,6 +72,10 @@ public:
     juce::String lastSmartReport;
 
 private:
+    void timerCallback() override;            // publishes this instance on DubLink
+    std::uint32_t linkId = dublink::newId();
+    LinkMeter linkMeter;
+
     float p (const char* id) const { return apvts.getRawParameterValue (id)->load(); }
     float macro (const char* id) const { return (p (id) - 50.0f) / 50.0f; }   // -1 .. +1
     float echoTimeMs();

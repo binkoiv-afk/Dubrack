@@ -657,6 +657,7 @@ DubRackEditor::DubRackEditor (DubRackProcessor& p)
                gatePanel.get(), deEssPanel.get(), macroPanel.get() };
     for (auto* c : panels) addChildComponent (c);
     addChildComponent (status);
+    addChildComponent (mixMap);
 
     simpleTab.setButtonText (String::fromUTF8 ("ПРОСТО"));
     proTab.setButtonText ("PRO");
@@ -789,6 +790,11 @@ void DubRackEditor::timerCallback()
     spectrum.update();
     meters.update();
     if (status.isVisible()) status.update();
+    {
+        const bool m = proc.resolvedInstrument() == "Mix Bus";
+        if (m != masterShown) { masterShown = m; mixMap.setVisible (m); resized(); }
+        if (m) mixMap.update();
+    }
     for (auto* p : panels) p->tick();
 
     if (proc.getCurrentProgram() != shownPreset)
@@ -875,6 +881,11 @@ void DubRackEditor::resized()
     r.reduce (10, 6);
     auto analyser = r.removeFromTop ((int) ((float) r.getHeight() * (proView ? 0.36f : 0.5f)));
     meters.setBounds (analyser.removeFromRight (180));
+    if (masterShown)
+    {
+        mixMap.setBounds (analyser.removeFromRight (juce::jmax (360, analyser.getWidth() * 9 / 20)));
+        analyser.removeFromRight (6);
+    }
     spectrum.setBounds (analyser);
 
     if (! proView)
@@ -921,7 +932,7 @@ void StatusCard::update()
     auto inst = proc.resolvedInstrument();
     const bool master = inst == "Mix Bus";
     int n = 0;
-    for (auto* other : MixRegistry::get().snapshot()) if (other != &proc) ++n;
+    for (auto& i : dublink::readAll()) if (i.id != proc.getLinkId()) ++n;
     String st = master ? proc.coordinator.getStatus() : String();
     const float prog = proc.coordinator.isRunning() ? proc.coordinator.getProgress() : 0.0f;
     if (inst != instrument || master != isMaster || n != linked || st != status || std::abs (prog - progress) > 0.001f || track != proc.getTrackName())
@@ -973,7 +984,7 @@ void StatusCard::paint (juce::Graphics& g)
     if (isMaster)
     {
         text = status.isNotEmpty() ? status
-             : String::fromUTF8 ("Связанных дорожек с DubRack: ") + String (linked)
+             : String::fromUTF8 ("Связанных дорожек (DubRack и DubRig): ") + String (linked)
                + String::fromUTF8 (".\nВключите самую плотную часть песни и нажмите АВТОСВЕДЕНИЕ: выставлю громкость, срезы и место для вокала на всех дорожках и доведу мастер до релизной громкости.");
     }
     else
@@ -991,4 +1002,170 @@ void StatusCard::paint (juce::Graphics& g)
         textArea.removeFromBottom (6);
     }
     g.drawFittedText (text, textArea, juce::Justification::topLeft, 20, 1.0f);
+}
+
+//==============================================================================
+//  Mix map (mix bus): where every linked track sits in pan and loudness
+//==============================================================================
+static juce::Colour familyColour (const juce::String& inst)
+{
+    if (inst == "Bass") return colours::violet;
+    if (inst == "Kick" || inst == "Snare" || inst == "Hi-Hat" || inst == "Toms" || inst == "Overheads" || inst == "Room"
+        || inst == "Drum Bus" || inst == "Percussion") return colours::coral;
+    if (inst.contains ("Guitar")) return colours::amber;
+    if (inst == "Organ Bubble" || inst == "Piano") return colours::cyan;
+    if (inst.contains ("Vocal")) return colours::pink;
+    if (inst.isNotEmpty()) return colours::orange;
+    return colours::dim;
+}
+
+void MixMapView::update()
+{
+    if (++tick % 6 != 0) return;                       // ~5 Hz
+    items.clear();
+    hints.clear();
+    for (auto& i : dublink::readAll())
+    {
+        if (i.id == proc.getLinkId()) continue;
+        const auto inst = dublink::str (i.instrument);
+        if (inst == "Mix Bus") continue;
+        Item it;
+        it.rig = i.kind == dublink::kindRig;
+        it.inst = inst;
+        it.label = dublink::str (i.track).isNotEmpty() ? dublink::str (i.track) : (it.rig ? juce::String ("DubRig") : juce::String ("DubRack"));
+        // DubRig knows its own pan; the measured L/R balance covers stereo effects and DubRack tracks
+        it.x = juce::jlimit (-1.0f, 1.0f, it.rig ? i.pan * (1.0f - 0.3f * i.width) + i.balance * 0.6f : i.balance);
+        it.lufs = i.lufsShort;
+        for (int b = 0; b < dublink::numBands; ++b) it.bands[b] = i.bands[b];
+        // a DubRig followed by a DubRack on the same track shows once (the DubRack sees the final sound)
+        if (it.rig)
+        {
+            bool dup = false;
+            for (auto& o : dublink::readAll()) if (o.kind == dublink::kindRack && dublink::str (o.track) == dublink::str (i.track) && it.label != "DubRig") dup = true;
+            if (dup) continue;
+        }
+        items.push_back (it);
+    }
+
+    // masking hints: two audible non-bass tracks, close in pan, loud in the same band (125 Hz .. 2 kHz)
+    for (size_t a = 0; a < items.size() && hints.size() < 3; ++a)
+        for (size_t b = a + 1; b < items.size() && hints.size() < 3; ++b)
+        {
+            const auto& A = items[a]; const auto& B = items[b];
+            if (A.lufs < -45 || B.lufs < -45 || A.inst == "Bass" || B.inst == "Bass") continue;
+            if (familyColour (A.inst) == colours::coral || familyColour (B.inst) == colours::coral) continue;   // drums vs. the rest is normal
+            if (std::abs (A.x - B.x) > 0.25f) continue;
+            for (int k = 1; k <= 5; ++k)
+            {
+                auto peakBand = [] (const Item& it) { float m = -200; for (float v : it.bands) m = juce::jmax (m, v); return m; };
+                if (A.bands[k] > peakBand (A) - 4 && B.bands[k] > peakBand (B) - 4 && std::abs (A.bands[k] - B.bands[k]) < 6)
+                {
+                    hints.add (A.label + " + " + B.label + juce::String::fromUTF8 (": спорят в ") + dublink::bandLabel (k)
+                               + juce::String::fromUTF8 (" Hz и стоят рядом. Разведите панораму или вырежьте одному."));
+                    break;
+                }
+            }
+        }
+    bool anyLow = false;
+    for (auto& it : items) if (it.inst == "Bass" && std::abs (it.x) > 0.2f) anyLow = true;
+    if (anyLow) hints.add (juce::String::fromUTF8 ("Бас не в центре: в регги бас и бочка держат центр."));
+    repaint();
+}
+
+void MixMapView::paint (juce::Graphics& g)
+{
+    auto b = getLocalBounds().toFloat().reduced (2.0f);
+    g.setColour (colours::well);
+    g.fillRoundedRectangle (b, 10.0f);
+    g.setColour (colours::line);
+    g.drawRoundedRectangle (b, 10.0f, 1.0f);
+
+    auto r = b.reduced (12.0f, 8.0f);
+    auto head = r.removeFromTop (18.0f);
+    g.setColour (colours::dim);
+    g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+    g.drawText (juce::String::fromUTF8 ("КАРТА МИКСА  (панорама / громкость)"), head, juce::Justification::centredLeft);
+    g.drawText (juce::String (items.size()) + juce::String::fromUTF8 (" дорожек"), head, juce::Justification::centredRight);
+
+    auto hintArea = r.removeFromBottom ((float) juce::jmin (3, juce::jmax (1, hints.size())) * 14.0f + 4.0f);
+    auto plot = r.reduced (4.0f, 6.0f);
+    // grid
+    g.setColour (colours::line);
+    for (float fx : { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f })
+        g.drawVerticalLine ((int) (plot.getX() + plot.getWidth() * fx), plot.getY(), plot.getBottom());
+    g.setFont (juce::FontOptions (10.0f));
+    const float loL = -48.0f, hiL = -6.0f;
+    for (float l : { -12.0f, -24.0f, -36.0f })
+    {
+        const float y = juce::jmap (l, loL, hiL, plot.getBottom(), plot.getY());
+        g.setColour (colours::line); g.drawHorizontalLine ((int) y, plot.getX(), plot.getRight());
+        g.setColour (colours::dim.withAlpha (0.7f)); g.drawText (juce::String ((int) l), juce::Rectangle<float> (plot.getX() + 2, y - 12, 30, 12), juce::Justification::centredLeft);
+    }
+    g.setColour (colours::dim);
+    g.drawText ("L", juce::Rectangle<float> (plot.getX() + 2, plot.getBottom() - 12, 12, 12), juce::Justification::centredLeft);
+    g.drawText ("R", juce::Rectangle<float> (plot.getRight() - 14, plot.getBottom() - 12, 12, 12), juce::Justification::centredRight);
+    g.drawText ("C", juce::Rectangle<float> (plot.getCentreX() - 6, plot.getBottom() - 12, 12, 12), juce::Justification::centred);
+
+    if (items.empty())
+    {
+        g.setColour (colours::dim);
+        g.setFont (juce::FontOptions (12.5f));
+        g.drawFittedText (juce::String::fromUTF8 ("Здесь появятся все дорожки с DubRack и DubRig: где они в панораме, насколько громкие и кто с кем спорит по частотам."),
+                          plot.reduced (30, 20).toNearestInt(), juce::Justification::centred, 4);
+    }
+    std::vector<juce::Rectangle<float>> placed;
+    struct Dot { float x, y, rad; const Item* it; };
+    std::vector<Dot> dots;
+    for (auto& it : items)
+    {
+        // sqrt scale: typical pans (L20..R40) stay readable
+        const float px = (it.x < 0 ? -1.0f : 1.0f) * std::sqrt (std::abs (it.x));
+        const float x = juce::jmap (px, -1.0f, 1.0f, plot.getX() + 10, plot.getRight() - 10);
+        const float y = juce::jmap (juce::jlimit (loL, hiL, it.lufs), loL, hiL, plot.getBottom() - 8, plot.getY() + 8);
+        const float rad = 6.0f + juce::jlimit (0.0f, 6.0f, (it.bands[0] + it.bands[1] - 2 * it.bands[5]) * 0.15f);
+        dots.push_back ({ x, y, rad, &it });
+        placed.push_back (juce::Rectangle<float> (rad * 2, rad * 2).withCentre ({ x, y }));
+    }
+    for (auto& d : dots)
+    {
+        const auto c = familyColour (d.it->inst);
+        g.setColour (c.withAlpha (0.2f)); g.fillEllipse (d.x - d.rad * 1.6f, d.y - d.rad * 1.6f, d.rad * 3.2f, d.rad * 3.2f);
+        g.setColour (d.it->lufs < -60 ? c.withAlpha (0.35f) : c);
+        g.fillEllipse (d.x - d.rad, d.y - d.rad, d.rad * 2, d.rad * 2);
+        if (d.it->rig) { g.setColour (colours::text); g.drawEllipse (d.x - d.rad - 2, d.y - d.rad - 2, d.rad * 2 + 4, d.rad * 2 + 4, 1.2f); }
+    }
+    g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
+    for (auto& d : dots)
+    {
+        const float tw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), d.it->label) + 6.0f;
+        const juce::Rectangle<float> base (d.x - tw * 0.5f, d.y - d.rad - 15, tw, 13);
+        auto lr = base;
+        for (float dy : { 0.0f, 2 * d.rad + 17.0f, -13.0f, 2 * d.rad + 30.0f, -26.0f, 2 * d.rad + 43.0f })
+        {
+            for (float dx : { 0.0f, tw * 0.5f + d.rad + 4.0f, -(tw * 0.5f + d.rad + 4.0f) })
+            {
+                auto cand = base.translated (dx, dx != 0.0f ? d.rad + 15.0f - 6.0f + dy : dy);
+                bool hit = false;
+                for (auto& o : placed) hit |= o.intersects (cand);
+                if (! hit) { lr = cand; goto found; }
+            }
+        }
+    found:
+        placed.push_back (lr);
+        g.setColour (colours::well.withAlpha (0.7f)); g.fillRoundedRectangle (lr, 3.0f);
+        g.setColour (colours::text.withAlpha (0.92f));
+        g.drawText (d.it->label, lr, juce::Justification::centred);
+    }
+
+    g.setFont (juce::FontOptions (11.0f));
+    if (hints.isEmpty() && ! items.empty())
+    {
+        g.setColour (colours::emerald);
+        g.drawText (juce::String::fromUTF8 ("Конфликтов по частотам не вижу."), hintArea, juce::Justification::centredLeft);
+    }
+    for (int i = 0; i < juce::jmin (3, hints.size()); ++i)
+    {
+        g.setColour (colours::amber);
+        g.drawFittedText (hints[i], hintArea.removeFromTop (14.0f).toNearestInt(), juce::Justification::centredLeft, 1);
+    }
 }

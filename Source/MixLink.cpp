@@ -23,6 +23,7 @@ float MixCoordinator::balanceOffset (const juce::String& style, const juce::Stri
         { "Percussion",   -14.0f,-12.0f,-13.0f,-14.0f },
         { "Skank Guitar", -10.0f, -7.0f, -8.0f,-12.0f },
         { "Lead Guitar",   -7.0f, -6.0f, -7.0f, -8.0f },
+        { "Rhythm Guitar", -9.0f, -7.0f, -8.0f,-11.0f },
         { "Organ Bubble", -11.0f, -9.0f,-10.0f,-12.0f },
         { "Piano",        -11.0f, -9.0f,-10.0f,-12.0f },
         { "Trumpet",      -10.0f, -6.0f, -8.0f,-10.0f },
@@ -46,7 +47,7 @@ float MixCoordinator::lowCutFloor (const juce::String& inst)
 {
     static const std::pair<const char*, float> rows[] = {
         { "Snare", 90 }, { "Hi-Hat", 300 }, { "Toms", 50 }, { "Overheads", 120 }, { "Room", 70 }, { "Percussion", 150 },
-        { "Skank Guitar", 180 }, { "Lead Guitar", 100 }, { "Organ Bubble", 120 }, { "Piano", 90 },
+        { "Skank Guitar", 180 }, { "Lead Guitar", 100 }, { "Rhythm Guitar", 140 }, { "Organ Bubble", 120 }, { "Piano", 90 },
         { "Trumpet", 200 }, { "Alto Sax", 160 }, { "Tenor Sax", 100 }, { "Bari Sax", 55 }, { "Trombone", 80 },
         { "Bass Trombone", 40 }, { "Horns", 150 }, { "Lead Vocal", 90 }, { "Backing Vocals", 140 },
     };
@@ -75,18 +76,32 @@ static void setParam (DubRackProcessor& p, const char* id, float v)
 void MixCoordinator::beginCapture()
 {
     for (auto* p : MixRegistry::get().snapshot()) p->loudness.startCapture();
+    capGen = dublink::startCapture();
     ticks = 0;
+}
+
+std::vector<dublink::Info> MixCoordinator::rigOnlyTracks() const
+{
+    juce::StringArray rackTracks;
+    for (auto* p : MixRegistry::get().snapshot()) if (p->getTrackName().isNotEmpty()) rackTracks.add (p->getTrackName());
+    std::vector<dublink::Info> out;
+    for (auto& i : dublink::readAll())
+        if (i.kind == dublink::kindRig && (dublink::str (i.track).isEmpty() || ! rackTracks.contains (dublink::str (i.track))))
+            out.push_back (i);
+    return out;
 }
 
 void MixCoordinator::start()
 {
-    if (MixRegistry::get().snapshot().size() < 2)
+    if (MixRegistry::get().snapshot().size() + rigOnlyTracks().size() < 2)
     {
-        status = juce::String::fromUTF8 ("Других DubRack не найдено. Поставьте DubRack на каждую дорожку (бас, кик, скенк...), потом снова сюда.");
+        status = juce::String::fromUTF8 ("Других DubRack / DubRig не найдено. Поставьте DubRack на каждую дорожку (бас, кик, скенк...), гитары можно через DubRig, потом снова сюда.");
         return;
     }
     report.clear();
     eqNotes.clear();
+    rigLowCut.clear();
+    rigPan.clear();
     stage = balance;
     progress = 0;
     beginCapture();
@@ -98,6 +113,7 @@ void MixCoordinator::cancel()
 {
     stopTimer();
     for (auto* p : MixRegistry::get().snapshot()) p->loudness.stopCapture();
+    dublink::stopCapture();
     stage = idle;
     status = juce::String::fromUTF8 ("Автосведение отменено.");
 }
@@ -115,6 +131,7 @@ void MixCoordinator::timerCallback()
     if (got < need) return;
 
     for (auto* p : MixRegistry::get().snapshot()) p->loudness.stopCapture();
+    dublink::stopCapture();
 
     if (stage == balance)
     {
@@ -149,7 +166,9 @@ void MixCoordinator::timerCallback()
 void MixCoordinator::applyBalance (bool firstPass)
 {
     const juce::String style = master.getStyleName();
-    struct Track { DubRackProcessor* p; juce::String inst; float lufs; };
+    // A track is either a DubRack (same DLL, set its params directly) or a DubRig on its own
+    // (other DLL, reached through DubLink requests).
+    struct Track { DubRackProcessor* p; std::uint32_t rigId; juce::String label, inst; float lufs, pan; };
     std::vector<Track> tracks;
     juce::StringArray lines;
 
@@ -164,9 +183,15 @@ void MixCoordinator::applyBalance (bool firstPass)
             continue;
         }
         if (l < -65.0f) { lines.add (p->getTrackLabel() + juce::String::fromUTF8 (": тишина, пропускаю")); continue; }
-        tracks.push_back ({ p, inst, l });
+        tracks.push_back ({ p, 0, p->getTrackLabel(), inst, l, 0.0f });
     }
-    if (tracks.empty()) { report = juce::String::fromUTF8 ("Нет звучащих дорожек с DubRack."); return; }
+    for (auto& r : rigOnlyTracks())
+    {
+        const auto label = dublink::str (r.track).isNotEmpty() ? dublink::str (r.track) : juce::String ("DubRig");
+        if (r.capGen != capGen || r.capChunks < 5 || r.capLufs < -65.0f) { lines.add (label + juce::String::fromUTF8 (" (DubRig): тишина, пропускаю")); continue; }
+        tracks.push_back ({ nullptr, r.id, label, dublink::str (r.instrument), r.capLufs, r.pan });
+    }
+    if (tracks.empty()) { report = juce::String::fromUTF8 ("Нет звучащих дорожек с DubRack / DubRig."); return; }
 
     // Anchor: bass if present, else kick, else drum bus, else the loudest track.
     const Track* anchor = nullptr;
@@ -181,35 +206,68 @@ void MixCoordinator::applyBalance (bool firstPass)
     bool hasVocal = false, hasLow = false;
     for (auto& t : tracks) { hasVocal |= t.inst == "Lead Vocal"; hasLow |= (t.inst == "Bass" || t.inst == "Kick"); }
 
+    // Stereo picture: guitars / keys that all sit in the centre get spread out (DubRig tracks only:
+    // DubRack has no pan of its own, the DAW pan stays the engineer's call).
+    if (firstPass)
+    {
+        auto isMid = [] (const juce::String& i) { return i.contains ("Guitar") || i == "Organ Bubble" || i == "Piano"; };
+        int centred = 0;
+        for (auto& t : tracks) if (isMid (t.inst)) ++centred;
+        if (centred >= 2)
+        {
+            bool left = true;
+            for (auto& t : tracks)
+                if (t.p == nullptr && isMid (t.inst) && t.inst != "Lead Guitar" && std::abs (t.pan) < 0.05f)
+                {
+                    rigPan[t.rigId] = left ? -0.35f : 0.35f;
+                    left = ! left;
+                }
+        }
+    }
+
     for (auto& t : tracks)
     {
         const float trim = juce::jlimit (-24.0f, 12.0f, anchorRef + balanceOffset (style, t.inst) - t.lufs);
-        setParam (*t.p, pid::mixTrim, trim);
-        juce::String line = t.p->getTrackLabel() + " (" + t.inst + "): " + (trim >= 0 ? "+" : "") + juce::String (trim, 1) + " dB";
+        juce::String line = t.label + " (" + t.inst + (t.p == nullptr ? ", DubRig" : "") + "): " + (trim >= 0 ? "+" : "") + juce::String (trim, 1) + " dB";
+        const float floor = lowCutFloor (t.inst);
+        const bool competesWithVocal = t.inst == "Skank Guitar" || t.inst == "Organ Bubble" || t.inst == "Piano"
+                                    || t.inst == "Lead Guitar" || t.inst == "Rhythm Guitar" || t.inst == "Horns" || t.inst.contains ("Sax")
+                                    || t.inst == "Trumpet" || t.inst == "Trombone";
 
-        if (firstPass)
+        if (t.p != nullptr)
         {
-            juce::String notes;
-            const float floor = lowCutFloor (t.inst);
-            if (hasLow && floor > 0.0f && t.p->apvts.getRawParameterValue (pid::hpf)->load() < floor)
+            setParam (*t.p, pid::mixTrim, trim);
+            if (firstPass)
             {
-                setParam (*t.p, pid::hpf, floor);
-                setParam (*t.p, pid::eqOn, 1.0f);
-                notes << juce::String::fromUTF8 (", срез низа ") << juce::String ((int) floor) << " Hz";
+                juce::String notes;
+                if (hasLow && floor > 0.0f && t.p->apvts.getRawParameterValue (pid::hpf)->load() < floor)
+                {
+                    setParam (*t.p, pid::hpf, floor);
+                    setParam (*t.p, pid::eqOn, 1.0f);
+                    notes << juce::String::fromUTF8 (", срез низа ") << juce::String ((int) floor) << " Hz";
+                }
+                if (hasVocal && competesWithVocal)
+                {
+                    setParam (*t.p, pid::umF, 2800.0f);
+                    setParam (*t.p, pid::umG, -2.5f);
+                    setParam (*t.p, pid::eqOn, 1.0f);
+                    notes << juce::String::fromUTF8 (", место для вокала (-2.5 dB @ 2.8k)");
+                }
+                eqNotes[t.p] = notes;
             }
-            const bool competesWithVocal = t.inst == "Skank Guitar" || t.inst == "Organ Bubble" || t.inst == "Piano"
-                                        || t.inst == "Lead Guitar" || t.inst == "Horns" || t.inst.contains ("Sax")
-                                        || t.inst == "Trumpet" || t.inst == "Trombone";
-            if (hasVocal && competesWithVocal)
-            {
-                setParam (*t.p, pid::umF, 2800.0f);
-                setParam (*t.p, pid::umG, -2.5f);
-                setParam (*t.p, pid::eqOn, 1.0f);
-                notes << juce::String::fromUTF8 (", место для вокала (-2.5 dB @ 2.8k)");
-            }
-            eqNotes[t.p] = notes;
+            line << eqNotes[t.p];
         }
-        line << eqNotes[t.p];
+        else
+        {
+            dublink::Request req;
+            req.trimDb = trim;
+            if (hasLow && floor > 0.0f) { req.lowCutHz = floor; rigLowCut[t.rigId] = floor; }
+            if (rigPan.count (t.rigId)) req.pan = rigPan[t.rigId];
+            dublink::sendRequest (t.rigId, req);
+            if (rigLowCut.count (t.rigId)) line << juce::String::fromUTF8 (", срез низа ") << juce::String ((int) rigLowCut[t.rigId]) << " Hz";
+            if (rigPan.count (t.rigId))
+                line << juce::String::fromUTF8 (", панорама ") << (rigPan[t.rigId] < 0 ? "L" : "R") << juce::String (juce::roundToInt (std::abs (rigPan[t.rigId]) * 100));
+        }
         lines.add (line);
     }
     report = juce::String::fromUTF8 ("Автосведение (") + style + "):\n" + lines.joinIntoString ("\n");

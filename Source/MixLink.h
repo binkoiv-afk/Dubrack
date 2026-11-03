@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <map>
+#include "DubLink.h"
 
 class DubRackProcessor;
 
@@ -44,7 +45,13 @@ private:
     bool adjustMaster (bool final);
 
     enum Stage { idle, balance, balance2, master1, master2 };
+    // DubRig instances (another plugin DLL) that sit on tracks without their own DubRack
+    std::vector<dublink::Info> rigOnlyTracks() const;
+
     DubRackProcessor& master;
+    std::uint32_t capGen = 0;
+    std::map<std::uint32_t, float> rigLowCut;
+    std::map<std::uint32_t, float> rigPan;
     Stage stage = idle;
     int ticks = 0;
     float progress = 0;
