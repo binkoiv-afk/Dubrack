@@ -1,4 +1,4 @@
-name: Build DubRack
+name: Build DubRack + DubRig
 
 on:
   push:
@@ -12,12 +12,22 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -A x64
       - name: Build
-        run: cmake --build build --config Release --target DubRack_VST3 --parallel
-      - name: Upload VST3
+        run: cmake --build build --config Release --target DubRack_VST3 DubRig_VST3 DubRig_Standalone --parallel
+      - name: Upload DubRack VST3
         uses: actions/upload-artifact@v5
         with:
           name: DubRack-Windows-VST3
           path: build/DubRack_artefacts/Release/VST3/DubRack.vst3
+      - name: Upload DubRig VST3
+        uses: actions/upload-artifact@v5
+        with:
+          name: DubRig-Windows-VST3
+          path: build/DubRig_artefacts/Release/VST3/DubRig.vst3
+      - name: Upload DubRig Standalone
+        uses: actions/upload-artifact@v5
+        with:
+          name: DubRig-Windows-Standalone
+          path: build/DubRig_artefacts/Release/Standalone/DubRig.exe
 
   macos:
     runs-on: macos-latest
@@ -26,9 +36,14 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Xcode
       - name: Build
-        run: cmake --build build --config Release --target DubRack_VST3 --parallel
-      - name: Upload VST3
+        run: cmake --build build --config Release --target DubRack_VST3 DubRig_VST3 --parallel
+      - name: Upload DubRack VST3
         uses: actions/upload-artifact@v5
         with:
           name: DubRack-macOS-VST3
           path: build/DubRack_artefacts/Release/VST3/DubRack.vst3
+      - name: Upload DubRig VST3
+        uses: actions/upload-artifact@v5
+        with:
+          name: DubRig-macOS-VST3
+          path: build/DubRig_artefacts/Release/VST3/DubRig.vst3

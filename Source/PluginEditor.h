@@ -147,6 +147,21 @@ private:
     int linked = 0;
 };
 
+// Mix-bus only: every linked DubRack / DubRig track on a pan x loudness map, plus masking hints.
+class MixMapView : public juce::Component
+{
+public:
+    explicit MixMapView (DubRackProcessor& p) : proc (p) {}
+    void update();
+    void paint (juce::Graphics&) override;
+    struct Item { juce::String label, inst; bool rig; float x, lufs; float bands[dublink::numBands]; };
+private:
+    DubRackProcessor& proc;
+    std::vector<Item> items;
+    juce::StringArray hints;
+    int tick = 0;
+};
+
 class DubRackEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -181,6 +196,8 @@ private:
     std::unique_ptr<ModulePanel> eqPanel, compPanel, satPanel, chorusPanel, echoPanel, revPanel, limPanel, gatePanel, deEssPanel;
     std::unique_ptr<ModulePanel> macroPanel;
     StatusCard status;
+    MixMapView mixMap { proc };
+    bool masterShown = false;
     std::unique_ptr<juce::FileChooser> chooser;
     int shownPreset = -1;
 

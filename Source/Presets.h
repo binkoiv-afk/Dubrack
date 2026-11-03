@@ -20,7 +20,8 @@ namespace presets
         "Skank Guitar", "Lead Guitar", "Organ Bubble", "Piano",
         "Trumpet", "Alto Sax", "Tenor Sax", "Bari Sax", "Trombone", "Bass Trombone", "Horns",
         "Lead Vocal", "Backing Vocals",
-        "Mix Bus" };
+        "Mix Bus",
+        "Rhythm Guitar" };                 // appended last so saved projects keep their instrument index
 
     const std::vector<FactoryPreset>& factory();
 
